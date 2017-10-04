@@ -45,6 +45,7 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_gem_cma_helper.h>
+#include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_fb_cma_helper.h>
 #include <drm/drm_panel.h>
 #include <drm/drm_of.h>
@@ -55,7 +56,7 @@
 #define DRIVER_DESC      "DRM module for Faraday TVE200"
 
 static const struct drm_mode_config_funcs mode_config_funcs = {
-	.fb_create = drm_fb_cma_create,
+	.fb_create = drm_gem_fb_create,
 	.atomic_check = drm_atomic_helper_check,
 	.atomic_commit = drm_atomic_helper_commit,
 };
@@ -87,6 +88,14 @@ static int tve200_modeset_init(struct drm_device *dev)
 			ret = PTR_ERR(bridge);
 			goto out_bridge;
 		}
+	} else {
+		/*
+		 * TODO: when we are using a different bridge than a panel
+		 * (such as a dumb VGA connector) we need to devise a different
+		 * method to get the connector out of the bridge.
+		 */
+		dev_err(dev->dev, "the bridge is not a panel\n");
+		goto out_bridge;
 	}
 
 	ret = tve200_display_init(dev);
@@ -95,21 +104,13 @@ static int tve200_modeset_init(struct drm_device *dev)
 		goto out_bridge;
 	}
 
-	if (bridge) {
-		ret = drm_bridge_attach(priv->encoder, bridge, NULL);
-		if (ret)
-			goto out_bridge;
-	}
-
-	/*
-	 * TODO: when we are using a different bridge than a panel
-	 * (such as a dumb VGA connector) we need to devise a different
-	 * method to get the connector out of the bridge.
-	 */
-	if (!panel) {
-		dev_err(dev->dev, "the bridge is not a panel\n");
+	ret = drm_simple_display_pipe_attach_bridge(&priv->pipe,
+						    bridge);
+	if (ret) {
+		dev_err(dev->dev, "failed to attach bridge\n");
 		goto out_bridge;
 	}
+
 	priv->panel = panel;
 	priv->connector = panel->connector;
 	priv->bridge = bridge;
@@ -138,8 +139,6 @@ static int tve200_modeset_init(struct drm_device *dev)
 out_bridge:
 	if (panel)
 		drm_panel_bridge_remove(bridge);
-	else
-		drm_bridge_remove(bridge);
 	drm_mode_config_cleanup(dev);
 finish:
 	return ret;
@@ -227,7 +226,7 @@ static int tve200_probe(struct platform_device *pdev)
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	priv->regs = devm_ioremap_resource(dev, res);
-	if (!priv->regs) {
+	if (IS_ERR(priv->regs)) {
 		dev_err(dev, "%s failed mmio\n", __func__);
 		ret = -EINVAL;
 		goto clk_disable;
@@ -275,8 +274,6 @@ static int tve200_remove(struct platform_device *pdev)
 		drm_fbdev_cma_fini(priv->fbdev);
 	if (priv->panel)
 		drm_panel_bridge_remove(priv->bridge);
-	else
-		drm_bridge_remove(priv->bridge);
 	drm_mode_config_cleanup(drm);
 	clk_disable_unprepare(priv->pclk);
 	drm_dev_unref(drm);
